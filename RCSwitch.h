@@ -158,8 +158,9 @@ private:
     void transmit(HighLow pulses);
 
 #if not defined(RCSwitchDisableReceiving)
-    static void handleInterrupt();
-    static bool receiveProtocol(const int p, unsigned int changeCount);
+    static void handleInterrupt0();
+    static void handleInterrupt1();
+    static bool receiveProtocol(const int p, unsigned int changeCount, unsigned int interrupt);
     int nReceiverInterrupt;
 #endif
     int nTransmitterPin;
@@ -177,7 +178,8 @@ private:
     /*
      * timings[0] contains sync timing, followed by a number of bits
      */
-    static unsigned int timings[RCSWITCH_MAX_CHANGES];
+    static unsigned int timings0[RCSWITCH_MAX_CHANGES];
+    static unsigned int timings1[RCSWITCH_MAX_CHANGES];
 #endif
 };
 

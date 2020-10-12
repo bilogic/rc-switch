@@ -107,7 +107,8 @@ const unsigned int RCSwitch::nSeparationLimit = 4300;
 // separationLimit: minimum microseconds between received codes, closer codes are ignored.
 // according to discussion on issue #14 it might be more suitable to set the separation
 // limit to the same time as the 'low' part of the sync signal for the current protocol.
-unsigned int RCSwitch::timings[RCSWITCH_MAX_CHANGES];
+unsigned int RCSwitch::timings0[RCSWITCH_MAX_CHANGES];
+unsigned int RCSwitch::timings1[RCSWITCH_MAX_CHANGES];
 #endif
 
 RCSwitch::RCSwitch()
@@ -601,7 +602,8 @@ void RCSwitch::enableReceive()
 #if defined(RaspberryPi) // Raspberry Pi
         wiringPiISR(this->nReceiverInterrupt, INT_EDGE_BOTH, &handleInterrupt);
 #else // Arduino
-        attachInterrupt(this->nReceiverInterrupt, handleInterrupt, CHANGE);
+        attachInterrupt(4, handleInterrupt0, CHANGE);
+        attachInterrupt(5, handleInterrupt1, CHANGE);
 #endif
     }
 }
@@ -612,7 +614,9 @@ void RCSwitch::enableReceive()
 void RCSwitch::disableReceive()
 {
 #if not defined(RaspberryPi) // Arduino
-    detachInterrupt(this->nReceiverInterrupt);
+    // detachInterrupt(this->nReceiverInterrupt);
+    detachInterrupt(4);
+    detachInterrupt(5);
 #endif // For Raspberry Pi (wiringPi) you can't unregister the ISR
     this->nReceiverInterrupt = -1;
 }
@@ -649,7 +653,7 @@ unsigned int RCSwitch::getReceivedProtocol()
 
 unsigned int *RCSwitch::getReceivedRawdata()
 {
-    return RCSwitch::timings;
+    return RCSwitch::timings0;
 }
 
 /* helper function for the receiveProtocol method */
@@ -661,19 +665,31 @@ static inline unsigned int diff(int A, int B)
 /**
  *
  */
-bool RECEIVE_ATTR RCSwitch::receiveProtocol(const int p, unsigned int changeCount)
+bool RECEIVE_ATTR RCSwitch::receiveProtocol(const int p, unsigned int changeCount, unsigned int interrupt)
 {
+
 #if defined(ESP8266) || defined(ESP32)
     const Protocol &pro = proto[p - 1];
 #else
     Protocol pro;
     memcpy_P(&pro, &proto[p - 1], sizeof(Protocol));
 #endif
+    unsigned int *timings;
+
+    switch (interrupt)
+    {
+    case 0:
+        timings = RCSwitch::timings0;
+        break;
+    case 1:
+        timings = RCSwitch::timings1;
+        break;
+    }
 
     unsigned long code = 0;
     //Assuming the longer pulse length is the pulse captured in timings[0]
     const unsigned int syncLengthInPulses = ((pro.syncFactor.low) > (pro.syncFactor.high)) ? (pro.syncFactor.low) : (pro.syncFactor.high);
-    const unsigned int delay = RCSwitch::timings[0] / syncLengthInPulses;
+    const unsigned int delay = timings[0] / syncLengthInPulses;
     const unsigned int delayTolerance = delay * RCSwitch::nReceiveTolerance / 100;
 
     /* For protocols that start low, the sync period looks like
@@ -698,13 +714,13 @@ bool RECEIVE_ATTR RCSwitch::receiveProtocol(const int p, unsigned int changeCoun
     for (unsigned int i = firstDataTiming; i < changeCount - 1; i += 2)
     {
         code <<= 1;
-        if (diff(RCSwitch::timings[i], delay * pro.zero.high) < delayTolerance &&
-            diff(RCSwitch::timings[i + 1], delay * pro.zero.low) < delayTolerance)
+        if (diff(timings[i], delay * pro.zero.high) < delayTolerance &&
+            diff(timings[i + 1], delay * pro.zero.low) < delayTolerance)
         {
             // zero
         }
-        else if (diff(RCSwitch::timings[i], delay * pro.one.high) < delayTolerance &&
-                 diff(RCSwitch::timings[i + 1], delay * pro.one.low) < delayTolerance)
+        else if (diff(timings[i], delay * pro.one.high) < delayTolerance &&
+                 diff(timings[i + 1], delay * pro.one.low) < delayTolerance)
         {
             // one
             code |= 1;
@@ -728,7 +744,7 @@ bool RECEIVE_ATTR RCSwitch::receiveProtocol(const int p, unsigned int changeCoun
     return false;
 }
 
-void RECEIVE_ATTR RCSwitch::handleInterrupt()
+void RECEIVE_ATTR RCSwitch::handleInterrupt0()
 {
 
     static unsigned int changeCount = 0;
@@ -742,7 +758,7 @@ void RECEIVE_ATTR RCSwitch::handleInterrupt()
     {
         // A long stretch without signal level change occurred. This could
         // be the gap between two transmission.
-        if ((repeatCount == 0) || (diff(duration, RCSwitch::timings[0]) < 200))
+        if ((repeatCount == 0) || (diff(duration, RCSwitch::timings0[0]) < 200))
         {
             // This long signal is close in length to the long signal which
             // started the previously recorded timings; this suggests that
@@ -754,7 +770,7 @@ void RECEIVE_ATTR RCSwitch::handleInterrupt()
             {
                 for (unsigned int i = 1; i <= numProto; i++)
                 {
-                    if (receiveProtocol(i, changeCount))
+                    if (receiveProtocol(i, changeCount, 0))
                     {
                         // receive succeeded for protocol i
                         break;
@@ -773,7 +789,56 @@ void RECEIVE_ATTR RCSwitch::handleInterrupt()
         repeatCount = 0;
     }
 
-    RCSwitch::timings[changeCount++] = duration;
+    RCSwitch::timings0[changeCount++] = duration;
+    lastTime = time;
+}
+
+void RECEIVE_ATTR RCSwitch::handleInterrupt1()
+{
+
+    static unsigned int changeCount = 0;
+    static unsigned long lastTime = 0;
+    static unsigned int repeatCount = 0;
+
+    const long time = micros();
+    const unsigned int duration = time - lastTime;
+
+    if (duration > RCSwitch::nSeparationLimit)
+    {
+        // A long stretch without signal level change occurred. This could
+        // be the gap between two transmission.
+        if ((repeatCount == 0) || (diff(duration, RCSwitch::timings1[0]) < 200))
+        {
+            // This long signal is close in length to the long signal which
+            // started the previously recorded timings; this suggests that
+            // it may indeed by a a gap between two transmissions (we assume
+            // here that a sender will send the signal multiple times,
+            // with roughly the same gap between them).
+            repeatCount++;
+            if (repeatCount == 2)
+            {
+                for (unsigned int i = 1; i <= numProto; i++)
+                {
+                    if (receiveProtocol(i, changeCount, 1))
+                    {
+                        // receive succeeded for protocol i
+                        break;
+                    }
+                }
+                repeatCount = 0;
+            }
+        }
+        changeCount = 0;
+    }
+
+    // detect overflow
+    if (changeCount >= RCSWITCH_MAX_CHANGES)
+    {
+        changeCount = 0;
+        repeatCount = 0;
+    }
+
+    RCSwitch::timings1[changeCount++] = duration;
     lastTime = time;
 }
 #endif
